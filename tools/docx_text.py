@@ -21,6 +21,7 @@ import zipfile
 import io
 
 W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+MC = "{http://schemas.openxmlformats.org/markup-compatibility/2006}"
 
 # Characters the brief requires removed outright.
 ZERO_WIDTH = dict.fromkeys(
@@ -53,27 +54,62 @@ def substitute(text):
     return text.translate(TRANSLATE)
 
 
-def _run_text(node):
-    """Text of one <w:r>, honouring tabs and no-break hyphens."""
-    out = []
-    for child in node.iter():
+def _subtree_text(node, out):
+    """Collect a paragraph subtree's visible text, in reading order.
+
+    One walk covers the whole subtree rather than taking each <w:r> in
+    turn, because two shapes in the Register's files put text where a
+    run-by-run walk reads it wrongly.
+
+      * A textbox anchors whole paragraphs inside the paragraph that
+        carries it, and their runs are descendants of that paragraph's
+        own run. A run-by-run walk joins those paragraphs to each other
+        with nothing between them, so Form 11A of the National Consumer
+        Credit Protection Regulations 2010 read "IMPORTANTWe have not
+        received a payment".
+      * An mc:AlternateContent element holds the same content twice --
+        mc:Choice for a reader that understands the newer markup, and
+        mc:Fallback for one that does not. A reader must render exactly
+        one of them. Reading both printed that form's banner twice over.
+
+    Emitting only <w:t> keeps out field instruction text in <w:instrText>
+    and the <w:delText> of a tracked deletion, as before.
+    """
+    for child in node:
         tag = child.tag
-        if tag == W + "t":
+        if tag == MC + "AlternateContent":
+            branch = child.find(MC + "Choice")
+            if branch is None:
+                branch = child.find(MC + "Fallback")
+            if branch is not None:
+                _subtree_text(branch, out)
+        elif tag == W + "t":
             out.append(child.text or "")
         elif tag == W + "noBreakHyphen":
-            out.append("‑")
+            out.append("\u2011")
         elif tag == W + "softHyphen":
-            out.append("­")
+            out.append("\u00ad")
         elif tag == W + "tab":
             out.append("\t")
         elif tag in (W + "br", W + "cr"):
             out.append(" ")
-    return "".join(out)
+        elif tag == W + "p":
+            # A nested paragraph is its own line. The separator is a
+            # newline and not a space because the heading splitter reads
+            # a tab or two spaces as the break between a provision number
+            # and its heading, and must not see one here.
+            out.append("\n")
+            _subtree_text(child, out)
+            out.append("\n")
+        else:
+            _subtree_text(child, out)
 
 
 def paragraph_text(paragraph, *, collapse=True):
     """Visible text of one <w:p>, excluding field instruction text."""
-    raw = "".join(_run_text(child) for child in paragraph.iter(W + "r"))
+    out = []
+    _subtree_text(paragraph, out)
+    raw = "".join(out)
     return normalise(raw) if collapse else substitute(raw)
 
 

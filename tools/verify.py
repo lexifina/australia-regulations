@@ -30,6 +30,25 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # nothing else.
 
 P_RE = re.compile(r"<w:p(?:\s[^>]*)?>.*?</w:p>|<w:p(?:\s[^>]*)?/>", re.S)
+# An mc:AlternateContent element carries the same content twice, once under
+# mc:Choice for a reader that understands the newer markup and once under
+# mc:Fallback for one that does not. A reader must render exactly one. The
+# prescribed forms in Schedule 1 of the National Consumer Credit Protection
+# Regulations 2010 are textboxes written this way, so a scan that reads both
+# counts each banner twice. Dropped by string surgery rather than by walking
+# a tree, to keep this reader independent of the builder's.
+ALTERNATE_RE = re.compile(r"<mc:AlternateContent\b.*?</mc:AlternateContent>", re.S)
+FALLBACK_RE = re.compile(r"<mc:Fallback\b.*?</mc:Fallback>", re.S)
+
+
+def one_branch(xml):
+    """Keep mc:Choice and drop its mc:Fallback twin, wherever both exist."""
+    def pick(match):
+        block = match.group(0)
+        if "<mc:Choice" not in block:
+            return block               # Fallback alone is the only content
+        return FALLBACK_RE.sub("", block)
+    return ALTERNATE_RE.sub(pick, xml)
 STYLE_RE = re.compile(r'<w:pStyle\s+w:val="([^"]+)"')
 TEXT_RE = re.compile(
     r"<w:t(?:\s[^>]*)?>(?P<text>[^<]*)</w:t>"
@@ -46,7 +65,12 @@ CONTAINERS = {"ActHead1": 0, "ActHead2": 1, "ActHead3": 2, "ActHead4": 3,
               "HC": 0, "HP": 1, "HD": 2, "HS": 3,
               "Scheduletitle": 0, "NewSchPt": 1}
 PROVISIONS = ("ActHead5", "LI-Heading2", "HR", "NewSchHd")
-ENDNOTES = ("ENoteNo", "EndNotes", "TableEnotesHeading")
+# The endnotes are opened by a heading that names them, and that heading
+# ends the law text. These three name nothing, and EndNotes is not the
+# endnotes in every instrument -- Word also sets a prescribed form's own
+# numbered footnotes with it -- so they end the law text only where no law
+# follows them.
+UNHEADED_ENDNOTES = ("ENoteNo", "EndNotes", "TableEnotesHeading")
 SCHEDULE_RE = re.compile(r"^Schedule\s+([0-9A-Za-z.]+)\b")
 
 
@@ -93,21 +117,41 @@ def _unescape(text):
                 .replace("&apos;", "'"))
 
 
+def law_text_end(read):
+    """How many of the (style, text) pairs in `read` are law text.
+
+    A heading that names the endnotes ends the law where it stands. A style
+    from UNHEADED_ENDNOTES ends it only until a container or provision
+    heading appears after it, which proves the law had not ended. An endnote
+    amendment table reprints provision numbers as table text rather than as
+    headings, so the real endnotes still end the law here.
+    """
+    unheaded = None
+    for index, (style, text) in enumerate(read):
+        if style and style.startswith(("ENotes", "Endnote", "LI-Endnote")):
+            return index
+        if style == "LI-Heading1" and text == "Endnotes":
+            return index               # the endnote boundary, LI- spelling
+        if style == "NoteHeading" and text.startswith("Notes to the"):
+            return index               # the same boundary, Statutory Rules
+        if style in UNHEADED_ENDNOTES:
+            if unheaded is None:
+                unheaded = index
+        elif style in CONTAINERS or style in PROVISIONS:
+            unheaded = None
+    return len(read) if unheaded is None else unheaded
+
+
 def minimal_paragraphs(docx_bytes):
     """Yield (style, text) for each body paragraph, endnotes excluded."""
     with zipfile.ZipFile(io.BytesIO(docx_bytes)) as archive:
         xml = archive.read("word/document.xml").decode("utf-8")
-    body = xml.split("<w:body>", 1)[-1]
+    body = one_branch(xml.split("<w:body>", 1)[-1])
+    read = []
     for match in P_RE.finditer(body):
         chunk = match.group(0)
         style_match = STYLE_RE.search(chunk)
         style = style_match.group(1) if style_match else None
-        if style and style.startswith(("ENotes", "Endnote", "LI-Endnote")):
-            return
-        if style in ENDNOTES:
-            return
-        if style and SKIP_RE.match(style):
-            continue
         pieces = []
         for text_match in TEXT_RE.finditer(chunk):
             if text_match.group("hyphen") is not None:
@@ -116,11 +160,11 @@ def minimal_paragraphs(docx_bytes):
                 pieces.append(" ")
             else:
                 pieces.append(_unescape(text_match.group("text")))
-        text = re.sub(r"\s+", " ", "".join(pieces).translate(DROP)).strip()
-        if style == "LI-Heading1" and text == "Endnotes":
-            return                      # the endnote boundary, LI- spelling
-        if style == "NoteHeading" and text.startswith("Notes to the"):
-            return                      # the same boundary, Statutory Rules
+        read.append((style, re.sub(r"\s+", " ",
+                                   "".join(pieces).translate(DROP)).strip()))
+    for style, text in read[:law_text_end(read)]:
+        if style and SKIP_RE.match(style):
+            continue
         if text:
             yield style, text
 

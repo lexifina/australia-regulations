@@ -55,14 +55,23 @@ FRONT_STYLES = {
     "Title", "CoverAct", "CoverMade", "CoverStatRule", "CoverUpdate",
     "UpdateDate", "RGHead", "RGPara",
 }
-# The endnotes begin the material about the law rather than the law, in each
-# of the three drafting styles.
-ENDNOTE_STYLES = {"ENoteNo", "EndNotes", "TableEnotesHeading"}
+# The endnotes begin the material about the law rather than the law. In every
+# drafting style a heading opens them and names them, and that heading is the
+# boundary. These three styles name nothing, and one of them is not the
+# endnotes at all in some instruments: Word's EndNotes style also sets the
+# numbered footnotes printed under a prescribed form. Schedule 1 of the
+# National Consumer Credit Protection Regulations 2010 uses it that way a
+# third of the way through the compilation, and treating it as the boundary
+# there drops the rest of Schedule 1 and all of Schedules 2 to 10. So these
+# end the law text only where no law follows them -- see _law_text_end.
+UNHEADED_ENDNOTE_STYLES = {"ENoteNo", "EndNotes", "TableEnotesHeading"}
 # Dropped: contents entries, running heads, endnote bodies, page furniture.
+# "Endnote" must not also match EndNotes, which is a prescribed form's own
+# footnote and is law text.
 SKIP_STYLE = re.compile(
-    r"^(TOC\d*|Header|Footer|ENotes|Endnote|LI-Endnote|LI-Contentsheading"
-    r"|Contents(Head|Page|SectionBreak)|PageBreak|SigningPageBreak"
-    r"|SchedSectionBreak|TextWOutChapSectionBreak)")
+    r"^(TOC\d*|Header|Footer|ENotes|Endnote(?![sS])|LI-Endnote"
+    r"|LI-Contentsheading|Contents(Head|Page|SectionBreak)|PageBreak"
+    r"|SigningPageBreak|SchedSectionBreak|TextWOutChapSectionBreak)")
 
 SCHEDULE_RE = re.compile(r"^Schedule\s+([0-9A-Za-z.]+)\b")
 # A container heading often carries its own number ("Part 6", "Division 2").
@@ -170,6 +179,34 @@ class Provision(object):
         return "\n".join(out).rstrip() + "\n"
 
 
+def _law_text_end(blocks):
+    """How many of `blocks` are law text, endnotes and all that follows cut off.
+
+    A heading that names the endnotes is trusted where it stands. A style
+    from UNHEADED_ENDNOTE_STYLES is trusted only until a container or
+    provision heading appears after it, which proves the law had not ended.
+    An endnote amendment table reprints provision numbers as table text, not
+    as headings, so the real endnotes survive this test.
+    """
+    unheaded = None
+    for index, block in enumerate(blocks):
+        if block.kind == "table":
+            continue
+        style, text = block.style, (block.text or "")
+        if style and style.startswith("ENotes"):
+            return index               # endnotes: end of the law text
+        if style == "LI-Heading1" and text == "Endnotes":
+            return index               # the same boundary, LI- spelling
+        if style == "NoteHeading" and text.startswith("Notes to the"):
+            return index               # the heading that opens those endnotes
+        if style in UNHEADED_ENDNOTE_STYLES:
+            if unheaded is None:
+                unheaded = index
+        elif style in CONTAINER_LEVEL or style in PROVISION_STYLES:
+            unheaded = None
+    return len(blocks) if unheaded is None else unheaded
+
+
 def parse(blocks, *, instrument_name, notes=None):
     """Return {relative path: file text} for one compilation.
 
@@ -251,7 +288,8 @@ def parse(blocks, *, instrument_name, notes=None):
             notes.append({"kind": "duplicate-number", "path": current.path,
                           "number": current.number})
 
-    for block in blocks:
+    blocks = list(blocks)
+    for block in blocks[:_law_text_end(blocks)]:
         if block.kind == "table":
             rows = [" | ".join(c for c in row) for row in block.text]
             rows = [r for r in rows if r.strip()]
@@ -265,14 +303,6 @@ def parse(blocks, *, instrument_name, notes=None):
             continue
 
         style, text, spaced = block.style, block.text, block.spaced
-        if style and style.startswith("ENotes"):
-            break                      # endnotes: end of the law text
-        if style == "LI-Heading1" and text == "Endnotes":
-            break                      # the same boundary, LI- spelling
-        if style in ENDNOTE_STYLES:
-            break                      # and again, Statutory Rules spelling
-        if style == "NoteHeading" and text.startswith("Notes to the"):
-            break                      # the heading that opens those endnotes
         if not text:
             continue
         if style and SKIP_STYLE.match(style):
