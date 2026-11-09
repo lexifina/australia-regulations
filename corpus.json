@@ -13,7 +13,7 @@
   "in_force_trailer": "In-force",
   "tool": "tools/build.py",
   "citation": {
-    "file": "([a-z0-9-]+)/(?:s-0*|r-)([0-9][0-9A-Za-z.\\-]*)\\.md",
+    "file": "corpus/([a-z0-9-]+)/(?:s-0*|r-)([0-9][0-9A-Za-z.\\-]*)\\.md",
     "cites": "(section|sections|s\\.?|regulation|regulations|reg\\.?|r\\.?) ?{n}([^0-9A-Za-z.]|$)"
   },
   "instruments": [
